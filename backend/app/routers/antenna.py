@@ -20,14 +20,40 @@ STATUSES = ["正常", "驻波异常", "下倾偏移", "已调整"]
 def list_entries(
     keyword: str | None = Query(default=None, description="按天馈编号检索"),
     status: str | None = Query(default=None, description="正常、驻波异常、下倾偏移、已调整"),
+    pending_only: bool = Query(default=False, description="只看待调整名单（驻波异常、下倾偏移）"),
+    sort: str | None = Query(default=None, description="按驻波比排序：vswr_asc、vswr_desc"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按天馈编号与状态过滤天馈系统列表；没有数据时返回空页，不报错。"""
+    """按天馈编号与状态过滤天馈系统列表，支持驻波比排序与分页；没有数据时返回空页，不报错。"""
+    if page < 1:
+        raise HTTPException(status_code=400, detail="页码从 1 开始")
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    if sort and sort not in ("vswr_asc", "vswr_desc"):
+        raise HTTPException(status_code=400, detail="排序方式仅支持 vswr_asc、vswr_desc")
+    items, total = service.list_entries(
+        keyword=keyword,
+        status=status,
+        pending_only=pending_only,
+        sort=sort,
+        page=page,
+        size=size,
+    )
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/stats/summary", response_model=dict)
+def stats_summary() -> dict[str, int]:
+    """天馈各状态数量统计，卡片与名单数量都以此为准。"""
+    return service.stats()
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出天馈系统清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "antenna", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -48,6 +74,15 @@ def create_entry(payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message="天馈设备已登记", entry=entry)
 
 
+@router.put("/{entry_id}", response_model=ActionResult)
+def update_entry(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """修改天馈资料（方位角、挂高、驻波比等）；只改字段，状态流转仍须走动作接口。"""
+    entry, message = service.update_entry(entry_id, payload.values)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
+
+
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     """对单条天馈设备执行记录异常、记录偏移、安排调整；不允许的动作会被拦下并说明原因。"""
@@ -56,10 +91,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出天馈系统清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "antenna", "total": total, "items": items}
